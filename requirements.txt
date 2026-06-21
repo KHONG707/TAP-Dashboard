@@ -1,0 +1,6 @@
+# Dependencies for the Streamlit dashboard (app.py).
+# The full analysis/notebook environment is preserved in requirements-dev.txt.
+streamlit==1.58.0
+plotly==6.8.0
+pandas==3.0.3
+openpyxl==3.1.5

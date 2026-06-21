@@ -1,0 +1,148 @@
+Data Cleaning, What, Why, How
+=============================
+
+Documentation of the data-cleaning stage for the TAP Desk take-home.
+
+- Input: data/TAP_Desk_Analyst_Project.xlsx (sheet Tickets, 1,000 rows × 14 columns)
+- Output: data/TAP_Desk_cleaned.xlsx (1,000 rows × 18 columns)
+- Code: analysis.ipynb, sections Data Quality Audit (pre-cleaning) and Data Cleaning
+- All work runs top-to-bottom and is reproducible; re-running the notebook regenerates the cleaned file.
+
+
+
+0. Approach
+-----------
+
+The cleaning is split into three auditable stages so every decision is traceable:
+
+1. Profile the raw file, counts, nulls, distinct values.
+2. Discovery scan, generic rules that surface problems without hard-coding what to look for, then focused cells that confirm and quantify each problem.
+3. Consolidated cleaning, a single cell that is the source of truth for the rest of the notebook, followed by a before/after audit and the export.
+
+Guiding principles:
+
+- Make missing-ness explicit and meaningful rather than silently dropping rows.
+- Flag/neutralize bad records, don't delete them, keep volume counts intact and the raw data visible.
+- Don't assign meaning the data can't support, especially to status labels.
+- Keep everything auditable, a copy of the raw frame (df_raw) is retained for before/after comparison.
+
+
+
+1. How the issues were discovered
+---------------------------------
+
+Technique              Rule                                                                              What it caught
+---------------------  --------------------------------------------------------------------------------  -----------------------------------------------------
+Whitespace             a clean value equals its own .strip(); flag value != value.strip()                'Search ', 'payments ' in Component
+Case/space collisions  normalize strip().casefold(); flag one normalized key mapping to >1 raw spelling  checkout/Checkout, payments /Payments, Search /Search
+Redundant categories   dump value lists of low-cardinality columns; scan for synonyms                    the 6 Status values (later confirmed 3 are identical)
+Hidden multi-values    check whether cells contain a , delimiter                                         Labels (20% of cells are comma-separated)
+Impossible dates       a duration can't be negative; a negative min reveals bad rows                     4 resolved-before-created rows
+Missing data           isna().sum() across all columns                                                   Assignee (25), Resolved (134), Labels (398)
+
+Whatever the blind scan flagged was then confirmed in a focused cell before any fix was applied.
+
+
+
+2. Cleaning actions, what, why, how
+-----------------------------------
+
+2.1 Component, casing / whitespace duplicates
+- What: 11 distinct Component labels, but checkout (17), Search  (8), payments  (5) are just messy versions of Checkout / Search / Payments.
+- Why: to a computer these are separate categories, so volume counts would be split and undercounted.
+- How: df["Component"] = df["Component"].str.strip().str.title() → collapses 11 → 8 real components. Other text columns were .strip()-ed for stray whitespace (no case change, since their casing was already consistent).
+
+2.2 Status, 6 values
+- What: Closed, Done, Resolved, Open, In Progress, In Review.
+- Note on the evidence: both trios are statistically indistinguishable on what we can measure, so this is a semantic + cost decision, not a claim that one trio is "proven" equivalent and the other isn't.
+- Why merge Closed/Done/Resolved: they are synonyms for one terminal state ("finished") (assumption). The data is consistent with that, all 100% have a Resolved date, with near-identical median resolution time (2.68 / 3.22 / 2.87 days), reopen rate (~0.14-0.15) and comment count (~2.0-2.25), and we can test them on their defining outcome (resolution time, since all are resolved) and it matches. Merging removes a meaningless 3-way split of the finished state.
+- Why keep Open/In Progress/In Review: these are conventionally distinct workflow stages, not synonyms (assumption). Their real differentiator, pipeline position / time-in-stage, is unmeasurable here (all 0% resolved, no status-history), so "no difference found" is weaker evidence than for the done-trio. Merging is irreversible and keeping them costs nothing (the binary cut covers "done vs not"), so we preserve them.
+- How: merge only the done-trio →
+  df["status_clean"] = df["Status"].where(~df["Status"].isin({"Closed","Done","Resolved"}), "Resolved").
+  The open labels are kept as-is (merging is irreversible and the labels may carry team meaning). The binary Resolved/Open cut is derived on the fly as status_clean == "Resolved", no separate column is stored. In the export, Status is overwritten in place with status_clean (4 values: Resolved, Open, In Progress, In Review).
+
+Decision note: an earlier draft claimed the open statuses were "distinct workflow stages" and that Open meant "untouched." Both were retracted, the data shows no behavioral difference between the open statuses, and 47/48 Open tickets actually have an assignee. We do not assign operational meaning the data can't support.
+
+2.3 TD-999, status/date contradiction
+- What: TD-999 is In Review (unresolved) yet carried a Resolved timestamp, which was also before its Created time.
+- Why: an unresolved ticket logically cannot have a resolution date.
+- How: rule-based: 
+  contradiction = (df["status_clean"] != "Resolved") & df["Resolved"].notna() → set those Resolved to NaT. Matched exactly one row (TD-999).
+
+2.4 Corrupt resolution times (resolved before created)
+- What: 3 resolved tickets (TD-471, TD-503, TD-915) have a Resolved date a few hours before Created → a negative, impossible duration. (TD-999 was a 4th such row, handled in §2.3.)
+- Why: the duration is corrupt, but the tickets are resolved, distinct from "not complete yet."
+- How: compute resolution_hours/resolution_days, then null only the corrupt ones:
+  invalid_resolution = df["resolution_hours"] < 0 then set those rows' resolution columns to NaN.
+  - invalid_resolution is a code-only variable (a boolean mask), not a stored or exported column.
+  - The raw Created/Resolved dates are kept so the glitch stays visible.
+  - This excludes them from all timing math without deleting the rows.
+
+Decision note: "not complete" is signalled naturally (blank Resolved/resolution_hours), and only genuinely corrupt timing is tracked, via the code-only invalid_resolution mask.
+
+2.5 Missing Resolved (134)
+- What / Why: these are the open tickets, a legitimate state, not an error (cross-tab confirms missing-Resolved aligns exactly with the open statuses).
+- How: left null. A blank Resolved (and resulting blank resolution_hours) is the "not complete" indicator.
+
+2.6 Missing Assignee (25)
+- What / Why: unassigned tickets, meaningful, not an error. (Notably, 24 of 25 are resolved tickets, not open.)
+- How: df["Assignee"] = df["Assignee"].fillna("Unassigned") so they form their own group in any groupby.
+
+2.7 Missing Labels (398) + multi-value labels
+- What / Why: ~40% of tickets have no labels (blank = no tags). Labels is multi-valued ("regression, ux").
+- How: label_list = split on ,, strip + lowercase each tag, drop empties → a clean list per row ([] when blank). In the export it's joined back to readable text.
+
+2.8 Subtasks (95)
+- What: Issue Type includes Subtask (95), alongside Reported Issue (607) and Feedback (298).
+- Why: in standard Jira a Subtask is a child of a parent issue (assumption), which would risk double-counting. But this file has no parent-link column, and subtasks have customers/components like any ticket, so the child relationship cannot be proven here.
+- How: treated as normal tickets (kept in all counts). An is_subtask boolean flag is kept only for optional filtering.
+
+Decision note: initially planned to separate subtasks out; reversed after confirming there is no evidence they are children in this dataset.
+
+
+
+3. Checks that came back clean (no action needed)
+-------------------------------------------------
+
+- No duplicate Issue Keys; no fully duplicate rows.
+- Reopen Count (0-3) and Comment Count (0-8): all valid, non-negative integers.
+- All Reporter values are well-formed emails.
+- All Created/Resolved dates fall within the stated Jan 2025 to May 2026 range; none after "today."
+- All Issue Keys match TD-<n>; no blank/whitespace-only Summary.
+- Quirk (not a defect): summaries are heavily templated (77 unique across 1,000 rows).
+
+
+
+4. Assumptions
+--------------
+
+- Timestamps are treated as naive local time (no timezone in the file).
+- The reporter email domain is independent of Customer, every customer shows all 12 reporter domains, so customer is never inferred from the reporter address.
+- No operational meaning is attributed to status labels beyond what the data shows.
+
+
+
+5. Derived fields and the cleaned file
+--------------------------------------
+
+Working columns added in the notebook (df):
+
+Column                              Meaning
+----------------------------------  ------------------------------------------------------------------------------------------------------------------------------------------
+status_clean                        Status with the done-trio (Closed/Done/Resolved) merged to Resolved; open labels kept
+resolution_hours / resolution_days  Resolved - Created; NaN if unresolved or corrupt
+is_subtask                          True for Issue Type == "Subtask"
+label_list                          normalized list of labels ([] when none)
+summary_norm                        Summary with variable tokens collapsed (order numbers to #N, state codes to {STATE}) so templated families aggregate instead of scattering
+created_month                       month of creation (YYYY-MM)
+created_dow                         day-of-week of creation
+post_release                        True if Created ≥ 2025-10-01 (the release)
+(code-only) invalid_resolution      mask of the 3 corrupt-timing rows; not a column
+
+Exported file data/TAP_Desk_cleaned.xlsx (18 columns):
+Issue Key, Issue Type, Summary, Status, Priority, Component, Reporter, Assignee, Customer, Created, created_month, post_release, Resolved, resolution_hours, Reopen Count, Labels, label_list, Comment Count
+
+- Status is the merged, in-place value (Resolved 865 / In Progress 48 / Open 48 / In Review 39).
+- resolution_hours is blank when a ticket isn't resolved or when its timing was corrupt.
+- Date columns are written with a lowercase Excel number format (yyyy-mm-dd hh:mm:ss) so Excel (incl. Excel for Mac) renders them correctly.
+- Excluded by request: status_clean, resolution_days, created_dow, and any timing flag.
