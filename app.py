@@ -38,7 +38,7 @@ def load_data() -> pd.DataFrame:
 
 all_tickets = load_data()
 
-# Sidebar ----------------------------------------------------------------------
+# Sidebar 
 st.sidebar.header("Filters")
 
 min_date = all_tickets["Created"].min().date()
@@ -62,7 +62,7 @@ selected_components = multifilter("Component", "Component")
 selected_statuses = multifilter("Status", "Status")
 selected_assignees = multifilter("Assignee", "Assignee")
 
-# Apply filters ----------------------------------------------------------------
+# Apply filters 
 row_filter = (
     all_tickets["Priority"].isin(selected_priorities)
     & all_tickets["Component"].isin(selected_components)
@@ -77,7 +77,7 @@ if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
 filtered_tickets = all_tickets[row_filter]
 
 
-# Focus-score helpers ----------------------------------------------------------
+# Focus-score helpers 
 def min_max_normalize(values: pd.Series) -> pd.Series:
     """Min-max normalize to 0-1; flat series -> all zeros."""
     value_range = values.max() - values.min()
@@ -123,13 +123,42 @@ def reopen_by_component(tickets: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def normalize_summary(summaries: pd.Series) -> pd.Series:
-    """Collapse variable tokens (order numbers, state codes) so templated issues
-    aggregate. Mirrors the notebook's summary_norm step."""
-    return (
-        summaries.str.replace(r"#\d+", "#N", regex=True)
+def pain_score_table(tickets: pd.DataFrame, min_count: int = 8) -> pd.DataFrame:
+    """Pain score for recurring Reported Issues, following the notebook's method.
+
+    Three signals (volume, severity as % High/Critical, reopen rate) are each
+    min-max normalized across every qualifying family, then averaged to a 0-100
+    score. Reported Issues only, families with at least `min_count` tickets,
+    normalized across all components so the score stays relative to the product.
+
+    One refinement over the notebook: issues are grouped on a normalized summary
+    (order numbers -> #N, state codes -> {STATE}) so templated families like
+    "Tax calculation off for {STATE}" aggregate instead of fragmenting below the
+    floor. This leaves single-string families (and the Payments ranking) unchanged.
+    """
+    reported = tickets[tickets["Issue Type"] == "Reported Issue"].assign(
+        Issue=lambda frame: frame["Summary"]
+        .str.replace(r"#\d+", "#N", regex=True)
         .str.replace(r"\bfor [A-Z]{2}\b", "for {STATE}", regex=True)
     )
+    families = reported.groupby("Issue").agg(
+        Component=("Component", lambda s: s.mode().iat[0]),
+        Tickets=("Issue Key", "size"),
+        high_critical=("Priority", lambda s: s.isin(HIGH_PRIORITIES).mean() * 100),
+        reopen=("Reopen Count", lambda s: (s > 0).mean() * 100),
+    )
+    families = families[families["Tickets"] >= min_count].copy()
+    if families.empty:
+        return families.reset_index()
+    for col in ["Tickets", "high_critical", "reopen"]:
+        low, high = families[col].min(), families[col].max()
+        families[col + "_z"] = 0.0 if high == low else (families[col] - low) / (high - low)
+    families["Pain score"] = (
+        (families["Tickets_z"] + families["high_critical_z"] + families["reopen_z"]) / 3 * 100
+    ).round()
+    families["High/Critical %"] = families["high_critical"].round()
+    families["Reopen %"] = families["reopen"].round()
+    return families.reset_index().sort_values("Pain score", ascending=False)
 
 
 # Header
@@ -278,32 +307,39 @@ with reopen_col:
 
 st.subheader(f"What to fix first in {top_component}")
 st.caption(
-    "The most common recurring issues in the top component, with order numbers and "
-    "state codes collapsed so templated tickets group together. This is the starting backlog."
+    "Recurring Reported Issues ranked by pain score (0 to 100): volume, severity (% High/"
+    "Critical), and reopen rate, each min-max normalized across all recurring issues and "
+    "averaged. Reported Issues with at least 8 tickets. The number in parentheses is the "
+    "ticket count for that issue."
 )
-top_component_tickets = filtered_tickets[filtered_tickets["Component"] == top_component]
-if top_component_tickets.empty:
-    st.info("No tickets for this component in the current selection.")
+pain_table = pain_score_table(filtered_tickets)
+pain_families = pain_table[pain_table["Component"] == top_component].head(10)
+if pain_families.empty:
+    st.info("No recurring Reported Issues (8+ tickets) for this component in the current selection.")
 else:
-    issue_families = (
-        normalize_summary(top_component_tickets["Summary"])
-        .value_counts()
-        .head(10)
-        .reset_index()
+    pain_families = pain_families.assign(
+        IssueLabel=pain_families["Issue"] + " (" + pain_families["Tickets"].astype(str) + ")"
     )
-    issue_families.columns = ["Issue", "Tickets"]
     fig = px.bar(
-        issue_families,
-        x="Tickets",
-        y="Issue",
+        pain_families,
+        x="Pain score",
+        y="IssueLabel",
         orientation="h",
-        text="Tickets",
-        color="Tickets",
+        text="Pain score",
+        color="Pain score",
         color_continuous_scale="OrRd",
+        custom_data=["Tickets", "High/Critical %", "Reopen %"],
     )
-    fig.update_traces(textposition="outside", cliponaxis=False)
+    fig.update_traces(
+        textposition="outside",
+        cliponaxis=False,
+        hovertemplate=(
+            "<b>%{y}</b><br>Pain score: %{x}<br>Tickets: %{customdata[0]}"
+            "<br>High/Critical: %{customdata[1]}%<br>Reopen: %{customdata[2]}%<extra></extra>"
+        ),
+    )
     fig.update_layout(
-        yaxis=dict(autorange="reversed"),
+        yaxis=dict(autorange="reversed", title=None),
         coloraxis_showscale=False,
         margin=dict(t=10),
     )
