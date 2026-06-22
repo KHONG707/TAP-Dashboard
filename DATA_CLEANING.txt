@@ -1,37 +1,31 @@
-Data Cleaning, What, Why, How
-=============================
+Data Cleaning
 
-Documentation of the data-cleaning stage for the TAP Desk take-home.
+Documentation of the data-cleaning stage
 
 - Input: data/TAP_Desk_Analyst_Project.xlsx (sheet Tickets, 1,000 rows × 14 columns)
 - Output: data/TAP_Desk_cleaned.xlsx (1,000 rows × 18 columns)
-- Code: analysis.ipynb, sections Data Quality Audit (pre-cleaning) and Data Cleaning
-- All work runs top-to-bottom and is reproducible; re-running the notebook regenerates the cleaned file.
+- All work runs top-to-bottom and is reproducible; re-running the notebook regenerates the cleaned file
 
 
 
-0. Approach
------------
+Approach
 
 The cleaning is split into three auditable stages so every decision is traceable:
 
 1. Profile the raw file, counts, nulls, distinct values.
-2. Discovery scan, generic rules that surface problems without hard-coding what to look for, then focused cells that confirm and quantify each problem.
-3. Consolidated cleaning, a single cell that is the source of truth for the rest of the notebook, followed by a before/after audit and the export.
+2. Discovery scan that surface problems without hard-coding what to look for, then focused cells that confirm and quantify each problem
+3. Consolidated cleaning, a single cell that is the source of truth for the rest of the notebook, followed by a before/after audit and the export
 
-Guiding principles:
-
-- Make missing-ness explicit and meaningful rather than silently dropping rows.
-- Flag/neutralize bad records, don't delete them, keep volume counts intact and the raw data visible.
-- Don't assign meaning the data can't support, especially to status labels.
-- Keep everything auditable, a copy of the raw frame (df_raw) is retained for before/after comparison.
+- Make missing-ness explicit and meaningful rather than silently dropping rows
+- Flag/neutralize bad records, don't delete them, keep volume counts intact and the raw data visible
+- Don't assign meaning the data can't support, especially to status labels
+- Keep everything auditable, a copy of the raw frame (df_raw) is retained for before/after comparison
 
 
 
 1. How the issues were discovered
----------------------------------
 
-Technique              Rule                                                                              What it caught
+Issues                 Rule                                                                              What it caught
 ---------------------  --------------------------------------------------------------------------------  -----------------------------------------------------
 Whitespace             a clean value equals its own .strip(); flag value != value.strip()                'Search ', 'payments ' in Component
 Case/space collisions  normalize strip().casefold(); flag one normalized key mapping to >1 raw spelling  checkout/Checkout, payments /Payments, Search /Search
@@ -40,12 +34,10 @@ Hidden multi-values    check whether cells contain a , delimiter                
 Impossible dates       a duration can't be negative; a negative min reveals bad rows                     4 resolved-before-created rows
 Missing data           isna().sum() across all columns                                                   Assignee (25), Resolved (134), Labels (398)
 
-Whatever the blind scan flagged was then confirmed in a focused cell before any fix was applied.
 
 
 
-2. Cleaning actions, what, why, how
------------------------------------
+2. Cleaning
 
 2.1 Component, casing / whitespace duplicates
 - What: 11 distinct Component labels, but checkout (17), Search  (8), payments  (5) are just messy versions of Checkout / Search / Payments.
@@ -60,8 +52,6 @@ Whatever the blind scan flagged was then confirmed in a focused cell before any 
 - How: merge only the done-trio →
   df["status_clean"] = df["Status"].where(~df["Status"].isin({"Closed","Done","Resolved"}), "Resolved").
   The open labels are kept as-is (merging is irreversible and the labels may carry team meaning). The binary Resolved/Open cut is derived on the fly as status_clean == "Resolved", no separate column is stored. In the export, Status is overwritten in place with status_clean (4 values: Resolved, Open, In Progress, In Review).
-
-Decision note: an earlier draft claimed the open statuses were "distinct workflow stages" and that Open meant "untouched." Both were retracted, the data shows no behavioral difference between the open statuses, and 47/48 Open tickets actually have an assignee. We do not assign operational meaning the data can't support.
 
 2.3 TD-999, status/date contradiction
 - What: TD-999 is In Review (unresolved) yet carried a Resolved timestamp, which was also before its Created time.
@@ -96,9 +86,6 @@ Decision note: "not complete" is signalled naturally (blank Resolved/resolution_
 - What: Issue Type includes Subtask (95), alongside Reported Issue (607) and Feedback (298).
 - Why: in standard Jira a Subtask is a child of a parent issue (assumption), which would risk double-counting. But this file has no parent-link column, and subtasks have customers/components like any ticket, so the child relationship cannot be proven here.
 - How: treated as normal tickets (kept in all counts). An is_subtask boolean flag is kept only for optional filtering.
-
-Decision note: initially planned to separate subtasks out; reversed after confirming there is no evidence they are children in this dataset.
-
 
 
 3. Checks that came back clean (no action needed)
