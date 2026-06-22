@@ -124,17 +124,9 @@ def reopen_by_component(tickets: pd.DataFrame) -> pd.DataFrame:
 
 
 def pain_score_table(tickets: pd.DataFrame, min_count: int = 8) -> pd.DataFrame:
-    """Pain score for recurring Reported Issues, following the notebook's method.
-
-    Three signals (volume, severity as % High/Critical, reopen rate) are each
+    """ Three signals (volume, severity as % High/Critical, reopen rate) are each
     min-max normalized across every qualifying family, then averaged to a 0-100
-    score. Reported Issues only, families with at least `min_count` tickets,
-    normalized across all components so the score stays relative to the product.
-
-    One refinement over the notebook: issues are grouped on a normalized summary
-    (order numbers -> #N, state codes -> {STATE}) so templated families like
-    "Tax calculation off for {STATE}" aggregate instead of fragmenting below the
-    floor. This leaves single-string families (and the Payments ranking) unchanged.
+    score.
     """
     reported = tickets[tickets["Issue Type"] == "Reported Issue"].assign(
         Issue=lambda frame: frame["Summary"]
